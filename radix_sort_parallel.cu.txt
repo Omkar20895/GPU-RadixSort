@@ -1,0 +1,281 @@
+/*
+ *
+ * radix_sort.cu
+ *
+ */
+ 
+ #include <time.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <cuda.h>
+
+ #define N		1024
+
+ int* r_values;
+ int* d_values;
+ int* t_values;
+
+ int* d_split;
+ int* d_e;
+ int* d_f;
+ int* d_t;
+ int* d_barrier;
+
+ // convert to binary string
+ char* Itoa(int value, char* str, int radix) {
+        static char dig[] =
+                "0123456789"
+                "abcdefghijklmnopqrstuvwxyz";
+        int n = 0, neg = 0;
+        unsigned int v;
+        char* p, *q;
+        char c;
+
+        if (radix == 10 && value < 0) {
+                value = -value;
+                neg = 1;
+        }
+        v = value;
+        do {
+                str[n++] = dig[v%radix];
+                v /= radix;
+        } while (v);
+        if (neg)
+                str[n++] = '-';
+        str[n] = '\0';
+
+        for (p = str, q = p + (n-1); p < q; ++p, --q)
+        c = *p, *p = *q, *q = c;
+        return str;
+}
+
+ // initialize data set
+ void Init(int* values, int i) {
+        srand( time(NULL) );
+        printf("\n------------------------------\n");
+
+        if (i == 0) {
+        // Uniform distribution
+                printf("Data set distribution: Uniform\n");
+                for (int x = 0; x < N; ++x) {
+                        values[x] = rand() % 100;
+                        //printf("%d ", values[x]);
+                }
+        }
+
+	// Convert to binary
+        char binary_string[8];
+	for (int x = 0; x < N; ++x) {
+        	Itoa(r_values[x], binary_string, 2);		// convert to binary string
+                r_values[x] = atoi(binary_string);		// convert to binary int
+		//printf(" %d\n", r_values[x]);
+	}
+
+       	printf("\n");
+}
+
+/*
+__device__ void __gpu_sync(int goalVal,int *arrayIn,int *arrayOut)
+{
+        int tid_in_block=threadIdx.x* blockDim.y + threadIdx.y;
+        int nBlockNum=gridDim.x+gridDim.y;
+        int bid= blockIdx.x *gridDim.y + blockIdx.y;
+        if(tid_in_block==0)
+        {
+                arrayIn[bid]=goalVal;
+        }
+        if(bid==1)
+        {
+                if(tid_in_block< nBlockNum)
+                {
+                        while(arrayIn[tid_in_block] != goalVal)
+                                {
+
+                                }
+                }
+        
+                __syncthreads();
+                if(tid_in_block< nBlockNum)
+                {
+                        arrayOut[tid_in_block]=goalVal;
+                }
+        }
+        if(tid_in_block==1)
+        {
+                while(arrayOut[bid] != goalVal )
+                        {
+                                
+                        }       
+        }
+        __syncthreads();
+                        
+}
+
+*/
+
+
+// Kernel function
+ __global__ static void Radix_sort(int* values, int* temp, int loop, int* split, int* e, int* f, int* t, int* barrier) {
+
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	int remainder[N], quotient[N];
+	int f_count, totalFalses;
+
+	if (idx < N) {
+		// split based on least significant bit
+		quotient[idx] = values[idx];
+		for (int x = 0; x < loop + 1; ++x) {
+			remainder[idx] = quotient[idx] % 10;
+			quotient[idx] = quotient[idx] / 10;
+		}
+
+		// set e[idx] = 0 in each 1 input and e[idx] = 1 in each 0 input	
+		if (remainder[idx] == 1) {
+			split[idx] = 1;
+			e[idx] = 0;
+		}
+		else {
+			split[idx] = 0;
+			e[idx] = 1;
+		}
+	}
+	__syncthreads();
+	  if(threadIdx.x == 0){
+                printf("threadIdx.x (1)= %d\n", threadIdx.x);
+               (*barrier)--;
+                printf("barrier (1) =%d\n", *barrier);
+        }
+        __syncthreads();
+
+        while(1){
+                if(*barrier==0){
+                        break;
+                }
+        }
+
+	__syncthreads();
+	if (idx < N) {
+		// scan the 1s
+		f_count = 0;
+		for (int x = 0; x < N; ++x) {
+			f[x] = f_count;
+			if (e[x] == 1)
+				f_count++;
+		}
+
+		// calculate totalFalses
+		totalFalses = e[N-1] + f[N-1];
+
+		if (split[idx] == 1) {
+			// t = idx - f + totalFalses
+			t[idx] = idx - f[idx] + totalFalses;
+		}
+		else if (split[idx] == 0) {
+			// t = f[idx]
+			t[idx] = f[idx];
+		}
+
+		// Scatter input using t as scatter address
+		temp[t[idx]] = values[idx];
+	}
+	__syncthreads();
+	  if(threadIdx.x == 0){
+                printf("threadIdx.x (1)= %d\n", threadIdx.x);
+               (*barrier)--;
+                printf("barrier (1) =%d\n", *barrier);
+        }
+        __syncthreads();
+
+        while(1){
+                if(*barrier==0){
+                        break;
+                }
+        }
+        __syncthreads();
+
+	// copy new arrangement back to values
+	if (idx < N) {
+		values[idx] = temp[idx];
+	}
+}
+
+ // program main
+ int main(int argc, char** argv) {
+	printf("./radix_sort starting with %d numbers...\n", N);
+	unsigned int hTimer;
+	size_t size = N * sizeof(int);
+
+	// allocate host memory
+	r_values = (int*)malloc(size);
+
+	// allocate device memory
+	cudaMalloc((void**)&d_values, size);
+	cudaMalloc((void**)&t_values, size);
+	cudaMalloc((void**)&d_split, size);
+	cudaMalloc((void**)&d_e, size);
+	cudaMalloc((void**)&d_f, size);
+	cudaMalloc((void**)&d_t, size);
+		barrier=(int *)malloc(sizeof(int));
+        *barrier=0;
+        cudaMalloc((void**)&d_barrier, sizeof(int));
+        cudaMemcpy(d_barrier, barrier, sizeof(int),cudaMemcpyHostToDevice);
+
+		// Initialize data set
+		Init(r_values, 0);
+
+		// copy data to device
+		cudaMemcpy(d_values, r_values, size, cudaMemcpyHostToDevice);
+		
+		printf("Beginning kernel execution...\n");
+
+		// execute kernel
+		for (int j = 0; j < 8; ++j) {
+			printf("------------------Starting with j = %d---------------------\n", j);
+			Radix_sort <<< 1, N >>> (d_values, t_values, j, d_split, d_e, d_f, d_t, d_barrier);
+			cudaThreadSynchronize();
+		}
+
+		// copy data back to host
+		cudaMemcpy(r_values, t_values, size, cudaMemcpyDeviceToHost);
+
+		// convert to decimal & test print
+		int r;
+		for (int x = 0; x < N; ++x) {
+			int 	val = 0,
+				power = 0;
+			while (r_values[x] > 0) {
+				r = r_values[x] % 10;
+				val = val + int(pow(2.0, power) * r);
+				r_values[x] = r_values[x] / 10;
+				power++;
+			}
+			r_values[x] = val;
+			//printf("%d ", r_values[x]);
+		}
+		//printf("\n");
+
+		// test
+		printf("\nTesting results...\n");
+		for (int x = 0; x < N - 1; ++x) {
+			if (r_values[x] > r_values[x + 1]) {
+				printf("Sorting failed.\n");
+				break;
+			}
+			else
+				if (x == N - 2)
+					printf("SORTING SUCCESSFUL\n");
+		}
+	
+
+	// free memory
+	cudaFree(d_values);
+	cudaFree(t_values);
+	cudaFree(d_split);
+	cudaFree(d_e);
+	cudaFree(d_f);
+	cudaFree(d_t);
+	cudaFree(d_barrier);
+	free(r_values);
+	free(barrier);
+	cudaThreadExit();
+ }
